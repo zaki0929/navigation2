@@ -366,6 +366,9 @@ protected:
   double pf_z_;
   double alpha_fast_;
   double alpha_slow_;
+  bool ex_reset_enabled_;
+  double alpha_;
+  double reset_th_cov_;
   int resample_interval_;
   std::string robot_model_type_;
   tf2::Duration save_pose_period_;

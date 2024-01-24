@@ -171,6 +171,12 @@ AmclNode::AmclNode(const rclcpp::NodeOptions & options)
     "by adding random poses",
     "A good value might be 0.001");
 
+  add_parameter("expansion_reset_enabled", rclcpp::ParameterValue(true));
+
+  add_parameter("expansion_reset_alpha", rclcpp::ParameterValue(0.001));
+
+  add_parameter("expansion_reset_th_cov", rclcpp::ParameterValue(0.0000001));
+
   add_parameter(
     "resample_interval", rclcpp::ParameterValue(1),
     "Number of filter updates required before resampling");
@@ -1073,6 +1079,9 @@ AmclNode::initParameters()
   get_parameter("pf_z", pf_z_);
   get_parameter("recovery_alpha_fast", alpha_fast_);
   get_parameter("recovery_alpha_slow", alpha_slow_);
+  get_parameter("expansion_reset_enabled", ex_reset_enabled_);
+  get_parameter("expansion_reset_alpha", alpha_);
+  get_parameter("expansion_reset_th_cov", reset_th_cov_);
   get_parameter("resample_interval", resample_interval_);
   get_parameter("robot_model_type", robot_model_type_);
   get_parameter("save_pose_rate", save_pose_rate);
@@ -1248,6 +1257,12 @@ AmclNode::dynamicParametersCallback(
       } else if (param_name == "recovery_alpha_slow") {
         alpha_slow_ = parameter.as_double();
         reinit_pf = true;
+      } else if (param_name == "expansion_reset_alpha") {
+        alpha_ = parameter.as_double();
+        reinit_pf = true;
+      } else if (param_name == "expansion_reset_th_cov") {
+        reset_th_cov_ = parameter.as_double();
+        reinit_pf = true;
       } else if (param_name == "save_pose_rate") {
         save_pose_rate = parameter.as_double();
         save_pose_period_ = tf2::durationFromSec(1.0 / save_pose_rate);
@@ -1306,6 +1321,9 @@ AmclNode::dynamicParametersCallback(
         set_initial_pose_ = parameter.as_bool();
       } else if (param_name == "first_map_only") {
         first_map_only_ = parameter.as_bool();
+      } else if (param_name == "expansion_reset_enabled") {
+        ex_reset_enabled_ = parameter.as_bool();
+        reinit_pf = true;
       }
     } else if (param_type == ParameterType::PARAMETER_INTEGER) {
       if (param_name == "max_beams") {
@@ -1578,8 +1596,12 @@ void
 AmclNode::initParticleFilter()
 {
   // Create the particle filter
+  RCLCPP_INFO(get_logger(), "Expansion reset applied!");
   pf_ = pf_alloc(
-    min_particles_, max_particles_, alpha_slow_, alpha_fast_,
+    min_particles_, max_particles_,
+    alpha_slow_, alpha_fast_,
+    alpha_, reset_th_cov_,
+    ex_reset_enabled_,
     (pf_init_model_fn_t)AmclNode::uniformPoseGenerator);
   pf_->pop_err = pf_err_;
   pf_->pop_z = pf_z_;

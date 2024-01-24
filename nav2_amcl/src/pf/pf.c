@@ -47,6 +47,8 @@ static int pf_resample_limit(pf_t * pf, int k);
 pf_t * pf_alloc(
   int min_samples, int max_samples,
   double alpha_slow, double alpha_fast,
+  double alpha, double reset_th_cov,
+  bool ex_reset_enabled,
   pf_init_model_fn_t random_pose_fn)
 {
   int i, j;
@@ -103,6 +105,10 @@ pf_t * pf_alloc(
 
   pf->alpha_slow = alpha_slow;
   pf->alpha_fast = alpha_fast;
+
+  pf->alpha = alpha;
+  pf->reset_th_cov = reset_th_cov;
+  pf->ex_reset_enabled = ex_reset_enabled;
 
   // set converged to 0
   pf_init_converged(pf);
@@ -262,13 +268,18 @@ void pf_update_sensor(pf_t * pf, pf_sensor_model_fn_t sensor_fn, void * sensor_d
   if (total > 0.0) {
     // Normalize weights
     double w_avg = 0.0;
+    double w_sum = 0.0;
+    double w_sumv = 0.0, w_v = 0.0;
     for (i = 0; i < set->sample_count; i++) {
       sample = set->samples + i;
-      w_avg += sample->weight;
+      w_sum += sample->weight;
+      w_sumv += sample->weight * sample->weight;
       sample->weight /= total;
     }
+    w_v = ((w_sumv) - (w_sum * w_sum / set->sample_count)) / set->sample_count;
+
     // Update running averages of likelihood of samples (Prob Rob p258)
-    w_avg /= set->sample_count;
+    w_avg = w_sum / set->sample_count;
     if (pf->w_slow == 0.0) {
       pf->w_slow = w_avg;
     } else {
@@ -279,6 +290,90 @@ void pf_update_sensor(pf_t * pf, pf_sensor_model_fn_t sensor_fn, void * sensor_d
     } else {
       pf->w_fast += pf->alpha_fast * (w_avg - pf->w_fast);
     }
+
+    // Expansion reset
+    double beta = 1.0 - (w_sum / pf->alpha);
+
+    // Kidnapped
+    if (beta > 0.0 && w_v < pf->reset_th_cov && pf->ex_reset_enabled) {
+      // Sum
+      double x_sum = 0.0;
+      double y_sum = 0.0;
+      double theta_sum = 0.0;
+
+      // Sum of squares
+      double x_sumv = 0.0;
+      double y_sumv = 0.0;
+      double theta_sumv = 0.0;
+
+      // Variance
+      double x_v = 0.0;
+      double y_v = 0.0;
+      double theta_v = 0.0;
+
+      // Variance limits
+      double v_limit = 20.0;
+      int reset_limit = 0;
+      int reset_count = 0;
+
+      printf("kidnapped\n");
+
+      pf_kdtree_clear(set->kdtree);
+
+      for (i = 0; i < set->sample_count; i++) {
+        sample = set->samples + i;
+        x_sum += sample->pose.v[0];
+        x_sumv += sample->pose.v[0] * sample->pose.v[0];
+        y_sum += sample->pose.v[1];
+        y_sumv += sample->pose.v[1] * sample->pose.v[1];
+        theta_sum += sample->pose.v[2];
+        theta_sumv += sample->pose.v[2] * sample->pose.v[2];
+      }
+
+      x_v = (x_sumv - (x_sum * x_sum / set->sample_count)) / set->sample_count;
+      y_v = (y_sumv - (y_sum * y_sum / set->sample_count)) / set->sample_count;
+      theta_v = (theta_sumv - (theta_sum * theta_sum / set->sample_count)) / set->sample_count;
+
+      // Variance limits
+      // - prevent overflow
+      if (x_v >= v_limit) {
+        x_v = v_limit;
+      }
+      if (x_v <= -v_limit) {
+        x_v = -v_limit;
+      }
+      if (y_v >= v_limit) {
+        y_v = v_limit;
+      }
+      if (y_v <= -v_limit) {
+        y_v = -v_limit;
+      }
+      if (theta_v >= M_PI/2) {
+        theta_v = M_PI/2;
+      }
+      if (theta_v <= -M_PI/2) {
+        theta_v = -M_PI/2;
+      }
+
+      reset_limit = ((int)x_v + (int)y_v) / 2;
+
+      // Spread the particles by variance
+      if (reset_count >= reset_limit) {
+        for (i = 0; i < set->sample_count; i++) {
+          sample = set->samples + i;
+          sample->pose.v[0] += (drand48() * 4 * x_v) - (2 * x_v);
+          sample->pose.v[1] += (drand48() * 4 * y_v) - (2 * y_v);
+          sample->pose.v[2] += (drand48() * 2 * theta_v) - (1 * theta_v);
+          sample->weight = 1.0 / set->sample_count;
+        }
+        reset_count = 0;
+        total = (*sensor_fn) (sensor_data, set);
+      }
+      reset_count++;
+    } else {
+      printf("not kidnapped\n");
+    }
+    
   } else {
     // Handle zero total
     for (i = 0; i < set->sample_count; i++) {
